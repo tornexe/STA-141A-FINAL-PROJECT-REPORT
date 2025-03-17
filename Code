@@ -1,0 +1,114 @@
+
+library(ggplot2)
+library(caret)
+
+session.mainfile <- "C:/users/torne/Downloads/sessions"
+session.file <- list.files(session.mainfile, full.names = TRUE, pattern = "\\.rds$")
+
+# Step 1: Find Max Neurons
+
+max.n <- max(sapply(session.file, function(f) {
+  data <- readRDS(f)
+  if (length(data$spks) > 0) {
+    return(nrow(data$spks[[1]]))
+  } else {
+    return(0)
+  }
+}))
+
+data.collect <- function(session) {
+data <- readRDS(session)
+
+spk.count <- sapply(data$spks, function(spike_matrix) sum(spike_matrix))
+
+firing.rate <- t(sapply(data$spks, function(spike_matrix) rowMeans(spike_matrix)))
+
+neuron.var <- ncol(firing.rate)
+if (neuron.var < max.n) {
+p.fix <- matrix(NA, nrow = nrow(firing.rate), ncol = max.n - neuron.var)
+firing.rate <- cbind(firing.rate, p.fix)
+} else if (neuron.var > max.n) {
+    firing.rate <- firing.rate[, 1:max.n]
+}
+
+session.dataframe <- data.frame(
+contrast_left = data$contrast_left,
+contrast_right = data$contrast_right,
+feedback_type = data$feedback_type,
+spk.count = spk.count
+  )
+
+  colnames(firing.rate) <- paste0("neuron_", 1:max.n)
+
+  session.dataframe <- cbind(session.dataframe, firing.rate)
+
+  return(session.dataframe)
+}
+data.single <- lapply(session.file, data.collect)
+
+c.names <- Reduce(intersect, lapply(data.single, colnames))
+data.single <- lapply(data.single, function(df) df[, c.names, drop = FALSE])
+
+combined.data <- do.call(rbind, data.single)
+
+str(combined.data)
+
+#Step 2: Exploratory Data Analysis (EDA)
+summary(combined.data)
+
+colSums(is.na(combined.data))
+
+ggplot(combined.data, aes(x = spk.count)) +
+  geom_histogram(binwidth = 100, fill = "lightblue", alpha = 0.7) +
+  labs(title = "Distribution of Spike Counts",
+       x = "Spike Count", y = "Frequency")
+
+sucess.rate <- aggregate(feedback_type ~ contrast_left + contrast_right, combined.data, function(x) mean(x == 1))
+
+ggplot(sucess.rate, aes(x = contrast_left, y = contrast_right, fill = feedback_type)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "orange", mid = "white", high = "darkblue", midpoint = 0.5) +
+  labs(title = "Success Rate of Stimuli Conditions",
+       x = "Left Contrast", y = "Right Contrast", fill = "Success Rate")
+
+class.data <- combined.data[, grep("neuron_", colnames(combined.data)), drop = FALSE]
+class.data <- as.matrix(class.data)
+
+col.fx <- apply(class.data, 2, function(x) length(unique(x)) > 1)
+class.data <- class.data[, col.fx, drop = FALSE]
+
+var.c <- apply(class.data, 2, function(x) sd(x, na.rm = TRUE) > 0)
+class.data <- class.data[, var.c, drop = FALSE]
+
+class.data[!is.finite(class.data)] <- NA
+class.data <- class.data[, colSums(is.na(class.data)) == 0, drop = FALSE]
+
+if (ncol(class.data) > 1) {
+  final.model <- prcomp(class.data, center = TRUE, scale. = TRUE)
+  final.data <- final.model$x[, 1:min(5, ncol(final.model$x))]
+
+  final.df <- as.data.frame(final.data)
+  colnames(final.df) <- paste0("PC", 1:ncol(final.df))
+
+  combined.data <- cbind(combined.data[, c("contrast_left", "contrast_right", "feedback_type")], final.df)
+} else {
+  combined.data <- combined.data[, c("contrast_left", "contrast_right", "feedback_type")]
+}
+
+
+#Step 3: Train Predictive Model
+
+combined.data$feedback_type <- as.factor(combined.data$feedback_type)
+
+set.seed(123)
+modelv2 <- createDataPartition(combined.data$feedback_type, p = 0.8, list = FALSE)
+set2 <- combined.data[modelv2, ]
+test2 <- combined.data[-modelv2, ]
+
+model <- train(feedback_type ~ ., data = set2, method = "glm", family = "binomial")
+
+summary(model)
+
+predictorv1 <- predict(model, test2)
+
+confusionMatrix(predictorv1, test2$feedback_type)
